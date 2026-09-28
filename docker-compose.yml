@@ -1,0 +1,300 @@
+x-app-common: &app-common
+  image: gluco-profile-app:latest
+  build:
+    context: .
+    dockerfile: ./docker/app/Dockerfile
+    args:
+      APP_UID: "${APP_UID}"
+      APP_GID: "${APP_GID}"
+  user: "${APP_UID}:${APP_GID}"
+  working_dir: /opt/project
+  restart: unless-stopped
+  volumes:
+    - .:/opt/project
+  environment: &app-env
+    PYTHONUNBUFFERED: "1"
+    PYTHONPATH: /opt/project
+    HOME: /home/appuser
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_DB: "${POSTGRES_DB}"
+    POSTGRES_USER: "${POSTGRES_USER}"
+    POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI}"
+    MLFLOW_EXPERIMENT_NAME: "${MLFLOW_EXPERIMENT_NAME}"
+    MLFLOW_MODEL_NAME: "${MLFLOW_MODEL_NAME}"
+    MLFLOW_MODEL_STAGE: "${MLFLOW_MODEL_STAGE}"
+    API_ADMIN_KEY: "${API_ADMIN_KEY}"
+
+x-airflow-common: &airflow-common
+  image: gluco-profile-airflow:latest
+  build:
+    context: .
+    dockerfile: ./docker/airflow/Dockerfile
+    args:
+      AIRFLOW_VERSION: "${AIRFLOW_VERSION}"
+  user: "${AIRFLOW_UID}:0"
+  restart: always
+  environment: &airflow-env
+    PYTHONUNBUFFERED: "1"
+    PYTHONPATH: /opt/project
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY}"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USERNAME}:admin"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/config/simple_auth_passwords.json
+    AIRFLOW__API_AUTH__JWT_SECRET: "${AIRFLOW_JWT_SECRET}"
+    AIRFLOW__API__SECRET_KEY: "${AIRFLOW_API_SECRET_KEY}"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${AIRFLOW_POSTGRES_USER}:${AIRFLOW_POSTGRES_PASSWORD}@airflow-postgres:5432/${AIRFLOW_POSTGRES_DB}"
+    AIRFLOW_CONN_gluco-profile_POSTGRES: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_DB: "${POSTGRES_DB}"
+    POSTGRES_USER: "${POSTGRES_USER}"
+    POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI}"
+    MLFLOW_EXPERIMENT_NAME: "${MLFLOW_EXPERIMENT_NAME}"
+    MLFLOW_MODEL_NAME: "${MLFLOW_MODEL_NAME}"
+    API_ADMIN_KEY: "${API_ADMIN_KEY}"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+    - ./logs/airflow:/opt/airflow/logs
+    - ./src:/opt/project/src
+    - ./data:/opt/project/data
+    - ./logs/application:/opt/project/logs
+    - ./reports:/opt/project/reports
+    - ./models:/opt/project/models
+  depends_on: &airflow-depends
+    airflow-postgres:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    mlflow:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - pgtables:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow-postgres:
+    image: postgres:17-alpine
+    container_name: airflow-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: "${AIRFLOW_POSTGRES_DB}"
+      POSTGRES_USER: "${AIRFLOW_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${AIRFLOW_POSTGRES_PASSWORD}"
+    ports:
+      - "${AIRFLOW_POSTGRES_PORT}:5432"
+    volumes:
+      - airflow_pgtables:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_POSTGRES_USER} -d ${AIRFLOW_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mlflow-postgres:
+    image: postgres:17-alpine
+    container_name: mlflow-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: "${MLFLOW_POSTGRES_DB}"
+      POSTGRES_USER: "${MLFLOW_POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${MLFLOW_POSTGRES_PASSWORD}"
+    ports:
+      - "${MLFLOW_POSTGRES_PORT}:5432"
+    volumes:
+      - mlflow_pgtables:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MLFLOW_POSTGRES_USER} -d ${MLFLOW_POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "${PGADMIN_EMAIL}"
+      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_PASSWORD}"
+    ports:
+      - "${PGADMIN_PORT}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-postgres:
+        condition: service_healthy
+      mlflow-postgres:
+        condition: service_healthy
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: ./docker/mlflow/Dockerfile
+      args:
+        APP_UID: "${APP_UID}"
+        APP_GID: "${APP_GID}"
+    image: gluco-profile-mlflow:latest
+    container_name: mlflow
+    restart: unless-stopped
+    ports:
+      - "${MLFLOW_PORT}:5000"
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    depends_on:
+      mlflow-postgres:
+        condition: service_healthy
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=postgresql+psycopg2://${MLFLOW_POSTGRES_USER}:${MLFLOW_POSTGRES_PASSWORD}@mlflow-postgres:5432/${MLFLOW_POSTGRES_DB}
+      - --artifacts-destination=/mlflow/artifacts
+      - --serve-artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  python:
+    <<: *app-common
+    container_name: gluco-profile-python
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    command: ["tail", "-f", "/dev/null"]
+
+  fastapi:
+    <<: *app-common
+    container_name: fastapi
+    environment:
+      <<: *app-env
+    ports:
+      - "${FASTAPI_PORT}:8000"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  streamlit:
+    <<: *app-common
+    container_name: streamlit
+    environment:
+      <<: *app-env
+      API_URL: http://fastapi:8000
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    ports:
+      - "${STREAMLIT_PORT}:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fastapi:
+        condition: service_started
+    command:
+      - streamlit
+      - run
+      - app/main.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    restart: "no"
+    user: "0:0"
+    entrypoint: /bin/bash
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins /opt/airflow/config /opt/project/data /opt/project/logs
+        printf '{"%s": "%s"}' "${AIRFLOW_ADMIN_USERNAME}" "${AIRFLOW_ADMIN_PASSWORD}" > /opt/airflow/config/simple_auth_passwords.json
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins /opt/airflow/config /opt/project/data /opt/project/logs
+        chmod -R g+rwX /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins /opt/airflow/config /opt/project/data /opt/project/logs
+        exec /entrypoint airflow version
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow
+    command: api-server
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+
+volumes:
+  pgtables:
+  airflow_pgtables:
+  mlflow_pgtables:
+  pgadmin_data:
+  mlflow_artifacts:
