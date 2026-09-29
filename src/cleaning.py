@@ -180,3 +180,43 @@ def detect_outliers(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def save_processed_data(df: pd.DataFrame, path: Path, index: bool = False) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=index)
+    return path
+
+
+def cleaning_pipeline(
+    raw_path: Path = RAW_DATA_PATH,
+    cleaned_path: Path = CLEANED_DATA_PATH,
+    transformed_path: Path = TRANSFORMED_DATA_PATH,
+    outlier_report_path: Path = OUTLIER_REPORT_PATH,
+    save: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    df = load_raw_data(raw_path)
+    df = clean_column_names(df)
+    df = validate_structure(df)
+    df = convert_to_numeric(df)
+    df = replace_zeros_with_nan(df)
+    df = replace_invalid_values_with_nan(df)
+    df = remove_duplicates(df)
+    df_clean = impute_missing_values(df)
+    validate_dataset(df_clean)
+    df_transformed = apply_transformations(df_clean)
+    validate_dataset(df_transformed)
+    outlier_report = detect_outliers(df_transformed)
+
+    if save:
+        save_processed_data(df_clean, cleaned_path)
+        save_processed_data(df_transformed, transformed_path)
+        save_processed_data(outlier_report, outlier_report_path)
+
+    return df_clean, df_transformed, outlier_report
+
+
+if __name__ == "__main__":
+    cleaned, transformed, report = cleaning_pipeline()
+    print(f"Cleaned dataset    : {cleaned.shape}")
+    print(f"Transformed dataset: {transformed.shape}")
+    print(report[["feature", "outlier_count", "outlier_percentage"]])
