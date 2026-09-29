@@ -1,0 +1,114 @@
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import IterativeImputer
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+RAW_DATA_PATH = PROJECT_ROOT / "data" / "raw" / "diabetes.csv"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+REPORTS_DIR = PROJECT_ROOT / "reports"
+CLEANED_DATA_PATH = PROCESSED_DIR / "diabetes_cleaned.csv"
+TRANSFORMED_DATA_PATH = PROCESSED_DIR / "diabetes_transformed.csv"
+OUTLIER_REPORT_PATH = REPORTS_DIR / "outlier_report.csv"
+
+EXPECTED_FEATURES = [
+    "Pregnancies",
+    "Glucose",
+    "BloodPressure",
+    "SkinThickness",
+    "Insulin",
+    "BMI",
+    "DiabetesPedigreeFunction",
+    "Age",
+]
+
+ZERO_AS_MISSING = [
+    "Glucose",
+    "BloodPressure",
+    "SkinThickness",
+    "Insulin",
+    "BMI",
+]
+
+VALIDITY_RULES = {
+    "Pregnancies": lambda s: s >= 0,
+    "Glucose": lambda s: s > 0,
+    "BloodPressure": lambda s: s > 0,
+    "SkinThickness": lambda s: s > 0,
+    "Insulin": lambda s: s > 0,
+    "BMI": lambda s: s > 0,
+    "DiabetesPedigreeFunction": lambda s: s >= 0,
+    "Age": lambda s: s > 0,
+}
+
+TRANSFORMATION_MAP = {
+    "Insulin": "log1p",
+    "DiabetesPedigreeFunction": "sqrt",
+    "Age": "log1p",
+}
+
+RANDOM_STATE = 42
+IQR_MULTIPLIER = 1.5
+
+
+def load_raw_data(path: Path = RAW_DATA_PATH) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Raw dataset not found: {path}")
+    return pd.read_csv(path)
+
+
+def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    result.columns = (
+        result.columns
+        .str.strip()
+        .str.replace("*", "", regex=False)
+    )
+    unnamed_columns = [
+        column for column in result.columns
+        if column.lower().startswith("unnamed")
+    ]
+    return result.drop(columns=unnamed_columns)
+
+
+def validate_structure(df: pd.DataFrame) -> pd.DataFrame:
+    missing_columns = [
+        column for column in EXPECTED_FEATURES
+        if column not in df.columns
+    ]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+    return df[EXPECTED_FEATURES].copy()
+
+
+def convert_to_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    for column in EXPECTED_FEATURES:
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+    return result
+
+
+def replace_zeros_with_nan(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    for column in ZERO_AS_MISSING:
+        result[column] = result[column].replace(0, np.nan)
+    return result
+
+
+def replace_invalid_values_with_nan(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    for column, is_valid in VALIDITY_RULES.items():
+        invalid_mask = result[column].notna() & ~is_valid(result[column])
+        result.loc[invalid_mask, column] = np.nan
+    return result
+
+
+def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop_duplicates().reset_index(drop=True)
+
+
