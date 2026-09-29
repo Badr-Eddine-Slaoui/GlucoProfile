@@ -143,3 +143,40 @@ def validate_dataset(df: pd.DataFrame) -> None:
             raise ValueError(f"Invalid values found in column: {column}")
 
 
+def apply_transformations(
+    df: pd.DataFrame,
+    transformation_map: dict[str, str] = TRANSFORMATION_MAP,
+) -> pd.DataFrame:
+    result = df.copy()
+    for feature, transformation in transformation_map.items():
+        if transformation == "log1p":
+            result[feature] = np.log1p(result[feature])
+        elif transformation == "sqrt":
+            result[feature] = np.sqrt(result[feature])
+        else:
+            raise ValueError(f"Unknown transformation: {transformation}")
+    return result
+
+
+def detect_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    records = []
+    for feature in EXPECTED_FEATURES:
+        q1 = df[feature].quantile(0.25)
+        q3 = df[feature].quantile(0.75)
+        iqr = q3 - q1
+        lower_bound = q1 - IQR_MULTIPLIER * iqr
+        upper_bound = q3 + IQR_MULTIPLIER * iqr
+        mask = (df[feature] < lower_bound) | (df[feature] > upper_bound)
+        records.append({
+            "feature": feature,
+            "Q1": q1,
+            "Q3": q3,
+            "IQR": iqr,
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
+            "outlier_count": int(mask.sum()),
+            "outlier_percentage": mask.mean() * 100,
+        })
+    return pd.DataFrame(records)
+
+
