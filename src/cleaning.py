@@ -112,3 +112,34 @@ def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop_duplicates().reset_index(drop=True)
 
 
+def get_observed_bounds(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    lower_bounds = df[EXPECTED_FEATURES].min().to_numpy()
+    upper_bounds = df[EXPECTED_FEATURES].max().to_numpy()
+    return lower_bounds, upper_bounds
+
+
+def impute_missing_values(df: pd.DataFrame) -> pd.DataFrame:
+    lower_bounds, upper_bounds = get_observed_bounds(df)
+    imputer = IterativeImputer(
+        random_state=RANDOM_STATE,
+        min_value=lower_bounds,
+        max_value=upper_bounds,
+    )
+    imputed_values = imputer.fit_transform(df[EXPECTED_FEATURES])
+    return pd.DataFrame(
+        imputed_values,
+        columns=EXPECTED_FEATURES,
+        index=df.index,
+    )
+
+
+def validate_dataset(df: pd.DataFrame) -> None:
+    if df.isna().sum().sum() != 0:
+        raise ValueError("Dataset still contains missing values")
+    if not np.isfinite(df.to_numpy()).all():
+        raise ValueError("Dataset contains infinite values")
+    for column, is_valid in VALIDITY_RULES.items():
+        if not is_valid(df[column]).all():
+            raise ValueError(f"Invalid values found in column: {column}")
+
+
