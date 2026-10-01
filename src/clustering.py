@@ -205,3 +205,57 @@ def compute_clustering_metrics(
     return metrics
 
 
+def compute_cluster_profiles(df_clustered: pd.DataFrame) -> pd.DataFrame:
+    profiles = df_clustered.groupby("Cluster")[FEATURES].mean()
+    counts = df_clustered["Cluster"].value_counts().sort_index()
+    profiles.insert(0, "count", counts)
+    profiles.insert(1, "percentage", counts / len(df_clustered) * 100)
+    return profiles
+
+
+def compute_risk_profile(
+    cluster_profiles: pd.DataFrame,
+    thresholds: dict[str, float] = RISK_THRESHOLDS,
+) -> pd.DataFrame:
+    risk_profile = cluster_profiles.copy()
+    for feature, threshold in thresholds.items():
+        risk_profile[f"{feature}_threshold_exceeded"] = risk_profile[feature] > threshold
+    risk_profile["criteres_depasses"] = sum(
+        risk_profile[f"{feature}_threshold_exceeded"].astype(int) for feature in thresholds
+    )
+    return risk_profile
+
+
+def identify_high_risk_cluster(
+    risk_profile: pd.DataFrame,
+    thresholds: dict[str, float] = RISK_THRESHOLDS,
+) -> int:
+    mask = pd.Series(True, index=risk_profile.index)
+    for feature, threshold in thresholds.items():
+        mask &= risk_profile[feature] > threshold
+    high_risk = risk_profile.index[mask].tolist()
+
+    if len(high_risk) != 1:
+        raise ValueError(
+            "Le projet suppose un unique cluster à haut risque, "
+            f"mais {len(high_risk)} clusters satisfont les trois seuils : {high_risk}"
+        )
+    return int(high_risk[0])
+
+
+def add_risk_category(
+    df_clustered: pd.DataFrame,
+    high_risk_cluster: int,
+) -> tuple[pd.DataFrame, dict[int, str]]:
+    risk_mapping = {
+        int(cluster): (RISK_HIGH_LABEL if cluster == high_risk_cluster else RISK_LOW_LABEL)
+        for cluster in sorted(df_clustered["Cluster"].unique())
+    }
+    result = df_clustered.copy()
+    result["risk_category"] = result["Cluster"].map(risk_mapping)
+    assert result["risk_category"].isna().sum() == 0
+    for cluster, category in risk_mapping.items():
+        logger.info("Cluster %d -> %s", cluster, category)
+    return result, risk_mapping
+
+
