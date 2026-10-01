@@ -259,3 +259,64 @@ def add_risk_category(
     return result, risk_mapping
 
 
+def fit_pca(X_scaled: np.ndarray) -> tuple[PCA, np.ndarray]:
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X_scaled)
+    assert X_pca.shape == (X_scaled.shape[0], 2)
+    logger.info("PCA : variance expliquée PC1+PC2 = %.2f %%",
+                pca.explained_variance_ratio_.sum() * 100)
+    return pca, X_pca
+
+
+def compute_pca_variance(pca: PCA) -> pd.Series:
+    return pd.Series(pca.explained_variance_ratio_ * 100, index=["PC1", "PC2"],
+                     name="variance_expliquee_%")
+
+
+def plot_pca_clusters(
+    X_pca: np.ndarray,
+    labels: np.ndarray,
+    centroids_pca: np.ndarray,
+    variance_pct: pd.Series,
+    path: Path = PCA_PLOT_PATH,
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 7))
+    for cluster_id in sorted(np.unique(labels)):
+        mask = labels == cluster_id
+        ax.scatter(X_pca[mask, 0], X_pca[mask, 1], s=35, alpha=0.65,
+                   label=f"Cluster {cluster_id}")
+    ax.scatter(centroids_pca[:, 0], centroids_pca[:, 1], marker="X", s=220,
+               edgecolor="black", linewidth=1.5, label="Centroïdes")
+    ax.axhline(0, linewidth=0.8, alpha=0.4)
+    ax.axvline(0, linewidth=0.8, alpha=0.4)
+    ax.set_xlabel(f"PC1 ({variance_pct['PC1']:.1f}% variance)")
+    ax.set_ylabel(f"PC2 ({variance_pct['PC2']:.1f}% variance)")
+    ax.set_title("Projection PCA des profils patients selon leur cluster")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def plot_cluster_sizes(
+    df_clustered: pd.DataFrame,
+    path: Path = SIZE_PLOT_PATH,
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    counts = df_clustered["Cluster"].value_counts().sort_index()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(counts.index.astype(str), counts.values)
+    for cluster_id, count in counts.items():
+        ax.text(str(cluster_id), count, f"{count}\n({count / len(df_clustered) * 100:.1f} %)",
+                ha="center", va="bottom")
+    ax.set_xlabel("Cluster")
+    ax.set_ylabel("Nombre de patients")
+    ax.set_title("Répartition des patients par cluster")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
