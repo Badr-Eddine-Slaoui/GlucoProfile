@@ -1,0 +1,91 @@
+{
+  "model": {
+    "name": "KMeans",
+    "n_clusters": 2,
+    "n_init": 10,
+    "random_state": 42,
+    "inertia": 1545.4156812625693
+  },
+  "scaler": {
+    "name": "RobustScaler",
+    "center": [
+      117.0,
+      72.0,
+      28.447103440184634,
+      4.876610891727273,
+      32.150000000000006
+    ],
+    "scale": [
+      41.25,
+      16.0,
+      12.879157303161957,
+      0.7415906936968595,
+      9.100000000000001
+    ]
+  },
+  "features": [
+    "Glucose",
+    "BloodPressure",
+    "SkinThickness",
+    "Insulin",
+    "BMI"
+  ],
+  "n_samples": 768,
+  "raw_to_final_label_mapping": {
+    "0": 0,
+    "1": 1
+  },
+  "cluster_mapping": {
+    "0": "Risque Faible",
+    "1": "Risque Élevé"
+  },
+  "risk_thresholds": {
+    "Glucose": 126.0,
+    "BMI": 30.0,
+    "DiabetesPedigreeFunction": 0.5
+  },
+  "risk_rule": "Un cluster est interprété comme à haut risque lorsque les moyennes de Glucose, BMI et DiabetesPedigreeFunction dépassent simultanément leurs seuils respectifs.",
+  "metrics": {
+    "inertia": 1545.4156812625693,
+    "silhouette": 0.2694109922437577,
+    "davies_bouldin": 1.3636636787283463,
+    "calinski_harabasz": 344.2818571543821,
+    "min_cluster_pct": 49.73958333333333,
+    "max_cluster_pct": 50.260416666666664,
+    "n_iter": 10.0
+  },
+  "pca": {
+    "n_components": 2,
+    "explained_variance_ratio": [
+      0.4824730266003186,
+      0.24353815189544156
+    ],
+    "total_explained_variance": 0.7260111784957601
+  },
+  "dataset_signature": {
+    "n_rows": 768,
+    "n_columns": 8,
+    "columns": [
+      "Pregnancies",
+      "Glucose",
+      "BloodPressure",
+      "SkinThickness",
+      "Insulin",
+      "BMI",
+      "DiabetesPedigreeFunction",
+      "Age"
+    ],
+    "content_sha256": "284f5f08ed1c74f5af5d8c9e9e7c6263cdd67de4eeb55f020fad7ebeb10e7dc8",
+    "schema_sha256": "10e5b2c54079002349e194f4c78600e2b76c03be27797e3ffbb1194e13019f2e"
+  },
+  "library_versions": {
+    "python": "3.13.14",
+    "numpy": "2.2.6",
+    "pandas": "2.2.3",
+    "scikit-learn": "1.6.1",
+    "scipy": "1.15.2",
+    "joblib": "1.4.2",
+    "matplotlib": "3.10.0",
+    "mlflow": "not-installed"
+  }
+}

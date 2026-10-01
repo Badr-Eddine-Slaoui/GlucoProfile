@@ -320,3 +320,131 @@ def plot_cluster_sizes(
     return path
 
 
+def get_library_versions(libraries: list[str] = LIBRARIES_TO_LOG) -> dict[str, str]:
+    versions = {"python": platform.python_version()}
+    for lib in libraries:
+        try:
+            versions[lib] = metadata.version(lib)
+        except metadata.PackageNotFoundError:
+            versions[lib] = "not-installed"
+    return versions
+
+
+def build_clustering_config(
+    df_clustered: pd.DataFrame,
+    scaler: RobustScaler,
+    kmeans: KMeans,
+    pca: PCA,
+    risk_mapping: dict[int, str],
+    label_mapping: dict[int, int],
+    metrics: dict[str, float],
+    dataset_signature: dict,
+) -> dict:
+    return {
+        "model": {
+            "name": FINAL_MODEL_NAME,
+            "n_clusters": int(FINAL_K),
+            "n_init": int(kmeans.n_init),
+            "random_state": int(RANDOM_STATE),
+            "inertia": float(kmeans.inertia_),
+        },
+        "scaler": {
+            "name": FINAL_SCALER_NAME,
+            "center": scaler.center_.tolist(),
+            "scale": scaler.scale_.tolist(),
+        },
+        "features": FINAL_FEATURES,
+        "n_samples": int(len(df_clustered)),
+        "raw_to_final_label_mapping": {str(k): int(v) for k, v in label_mapping.items()},
+        "cluster_mapping": {str(c): cat for c, cat in risk_mapping.items()},
+        "risk_thresholds": {f: float(t) for f, t in RISK_THRESHOLDS.items()},
+        "risk_rule": (
+            "Un cluster est interprété comme à haut risque lorsque "
+            "les moyennes de Glucose, BMI et DiabetesPedigreeFunction "
+            "dépassent simultanément leurs seuils respectifs."
+        ),
+        "metrics": metrics,
+        "pca": {
+            "n_components": 2,
+            "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
+            "total_explained_variance": float(pca.explained_variance_ratio_.sum()),
+        },
+        "dataset_signature": dataset_signature,
+        "library_versions": get_library_versions(),
+    }
+
+
+def save_dataframe(df: pd.DataFrame, path: Path, index: bool = False) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=index)
+    return path
+
+
+def save_artifacts(
+    df_clustered: pd.DataFrame,
+    scaler: RobustScaler,
+    kmeans: KMeans,
+    pca: PCA,
+    config: dict,
+    cluster_profiles: pd.DataFrame,
+    risk_profile: pd.DataFrame,
+    pca_variance_pct: pd.Series,
+) -> dict[str, Path]:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    save_dataframe(df_clustered, FINAL_CLUSTERED_DATA_PATH, index=False)
+    joblib.dump(scaler, FINAL_SCALER_PATH)
+    joblib.dump(kmeans, FINAL_KMEANS_PATH)
+    joblib.dump(pca, FINAL_PCA_PATH)
+
+    with FINAL_CONFIG_PATH.open("w", encoding="utf-8") as file:
+        json.dump(config, file, indent=2, ensure_ascii=False)
+
+    cluster_profiles.to_csv(FINAL_PROFILE_REPORT_PATH)
+    risk_profile.to_csv(FINAL_RISK_REPORT_PATH)
+    pca_variance_pct.to_frame("variance_expliquee_%").to_csv(FINAL_PCA_REPORT_PATH)
+
+    saved = {
+        "Dataset": FINAL_CLUSTERED_DATA_PATH,
+        "Scaler": FINAL_SCALER_PATH,
+        "K-Means": FINAL_KMEANS_PATH,
+        "PCA": FINAL_PCA_PATH,
+        "Configuration": FINAL_CONFIG_PATH,
+        "Cluster profiles": FINAL_PROFILE_REPORT_PATH,
+        "Risk profile": FINAL_RISK_REPORT_PATH,
+        "PCA variance": FINAL_PCA_REPORT_PATH,
+    }
+    for name, path in saved.items():
+        assert path.exists(), f"Artefact manquant : {name} ({path})"
+    return saved
+
+
+def verify_saved_artifacts(
+    X_final: pd.DataFrame,
+    X_final_scaled: np.ndarray,
+    raw_labels: np.ndarray,
+    X_pca: np.ndarray,
+    df_clustered: pd.DataFrame,
+) -> None:
+    loaded_scaler = joblib.load(FINAL_SCALER_PATH)
+    loaded_kmeans = joblib.load(FINAL_KMEANS_PATH)
+    loaded_pca = joblib.load(FINAL_PCA_PATH)
+
+    X_reloaded_scaled = loaded_scaler.transform(X_final)
+    assert np.allclose(X_reloaded_scaled, X_final_scaled)
+
+    assert np.array_equal(loaded_kmeans.predict(X_reloaded_scaled), raw_labels)
+
+    assert np.allclose(loaded_pca.transform(X_final_scaled), X_pca)
+
+    loaded_clustered = pd.read_csv(FINAL_CLUSTERED_DATA_PATH)
+    assert loaded_clustered.shape == df_clustered.shape
+    assert list(loaded_clustered.columns) == list(df_clustered.columns)
+    assert loaded_clustered["Cluster"].equals(df_clustered["Cluster"])
+    assert loaded_clustered["risk_category"].equals(df_clustered["risk_category"])
+
+    logger.info("Vérification par rechargement réussie")
+
+
