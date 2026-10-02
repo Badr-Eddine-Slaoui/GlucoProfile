@@ -159,3 +159,57 @@ def split_data(
     return X_train, X_test, y_train, y_test
 
 
+def build_final_pipeline() -> Pipeline:
+    return Pipeline(steps=[
+        ("scaler", "passthrough"),
+        ("classifier", LogisticRegression(
+            C=FINAL_C,
+            max_iter=FINAL_MAX_ITER,
+            random_state=RANDOM_STATE,
+        )),
+    ])
+
+
+def train_pipeline(
+    pipeline: Pipeline,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+) -> Pipeline:
+    assert not X_train.isna().any().any()
+    assert np.isfinite(X_train.to_numpy()).all()
+    pipeline.fit(X_train, y_train)
+    classifier = pipeline.named_steps["classifier"]
+    assert list(classifier.classes_) == CLASS_LABELS
+    logger.info("Pipeline entraîné : %s, C=%.1f, %d observations",
+                FINAL_MODEL_NAME, FINAL_C, len(X_train))
+    return pipeline
+
+
+def run_cross_validation(
+    pipeline: Pipeline,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+) -> dict[str, float]:
+    cv = StratifiedKFold(n_splits=CV_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+    scores = cross_validate(
+        pipeline,
+        X_train,
+        y_train,
+        cv=cv,
+        scoring={
+            "accuracy": "accuracy",
+            "precision": "precision",
+            "recall": "recall",
+            "f1": "f1",
+        },
+        n_jobs=1,
+    )
+    cv_metrics = {}
+    for name in ("accuracy", "precision", "recall", "f1"):
+        values = scores[f"test_{name}"]
+        cv_metrics[f"cv_{name}_mean"] = float(values.mean())
+        cv_metrics[f"cv_{name}_std"] = float(values.std())
+    logger.info("CV F1 = %.4f ± %.4f", cv_metrics["cv_f1_mean"], cv_metrics["cv_f1_std"])
+    return cv_metrics
+
+
