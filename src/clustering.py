@@ -92,6 +92,27 @@ LIBRARIES_TO_LOG = [
 ]
 
 
+class ClusteringModel(mlflow.pyfunc.PythonModel):
+    def load_context(self, context):
+        self.scaler = joblib.load(context.artifacts["scaler"])
+        self.kmeans = joblib.load(context.artifacts["kmeans"])
+        with open(context.artifacts["config"], encoding="utf-8") as file:
+            config = json.load(file)
+        self.features = config["features"]
+        self.label_map = {int(k): int(v) for k, v in config["raw_to_final_label_mapping"].items()}
+        self.risk_map = {int(k): v for k, v in config["cluster_mapping"].items()}
+
+    def predict(self, context, model_input, params=None):
+        X = model_input[self.features].astype("float64")
+        X_scaled = self.scaler.transform(X)
+        raw_labels = self.kmeans.predict(X_scaled)
+        final_labels = np.array([self.label_map[int(label)] for label in raw_labels], dtype="int64")
+        return pd.DataFrame({
+            "Cluster": final_labels,
+            "risk_category": [self.risk_map[int(label)] for label in final_labels],
+        })
+
+
 def load_data(
     cleaned_path: Path = CLEANED_DATA_PATH,
     transformed_path: Path = TRANSFORMED_DATA_PATH,
@@ -448,3 +469,208 @@ def verify_saved_artifacts(
     logger.info("Vérification par rechargement réussie")
 
 
+def setup_mlflow(
+    tracking_uri: str | None = None,
+    experiment_name: str = MLFLOW_EXPERIMENT_NAME,
+):
+    uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", DEFAULT_MLFLOW_URI)
+    mlflow.set_tracking_uri(uri)
+    mlflow.set_experiment(experiment_name)
+    logger.info("MLflow : uri=%s, experiment=%s", uri, experiment_name)
+    return mlflow
+
+
+def log_pyfunc_model(
+    mlflow,
+    X_final: pd.DataFrame,
+    df_clustered: pd.DataFrame,
+    saved_artifacts: dict[str, Path],
+):
+    input_example = X_final.head(5).astype("float64")
+    output_example = pd.DataFrame({
+        "Cluster": df_clustered["Cluster"].head(5).to_numpy(dtype="int64"),
+        "risk_category": df_clustered["risk_category"].head(5).to_numpy(),
+    })
+    signature = infer_signature(input_example, output_example)
+
+    model_info = mlflow.pyfunc.log_model(
+        artifact_path=MLFLOW_MODEL_NAME,
+        python_model=ClusteringModel(),
+        artifacts={
+            "scaler": str(saved_artifacts["Scaler"]),
+            "kmeans": str(saved_artifacts["K-Means"]),
+            "config": str(saved_artifacts["Configuration"]),
+        },
+        signature=signature,
+        input_example=input_example,
+        registered_model_name=MLFLOW_REGISTERED_MODEL_NAME,
+        pip_requirements=[
+            f"numpy=={metadata.version('numpy')}",
+            f"pandas=={metadata.version('pandas')}",
+            f"scikit-learn=={metadata.version('scikit-learn')}",
+            f"joblib=={metadata.version('joblib')}",
+        ],
+    )
+
+    loaded_model = mlflow.pyfunc.load_model(model_info.model_uri)
+    predictions = loaded_model.predict(X_final.astype("float64"))
+    assert np.array_equal(predictions["Cluster"].to_numpy(), df_clustered["Cluster"].to_numpy())
+    assert np.array_equal(
+        predictions["risk_category"].to_numpy(), df_clustered["risk_category"].to_numpy()
+    )
+    logger.info("Vérification du modèle MLflow rechargé réussie : %s", model_info.model_uri)
+
+    version = getattr(model_info, "registered_model_version", None)
+    if version is not None:
+        client = mlflow.MlflowClient()
+        client.set_registered_model_alias(
+            MLFLOW_REGISTERED_MODEL_NAME, MLFLOW_PRODUCTION_ALIAS, str(version)
+        )
+        logger.info("Alias '%s' -> %s v%s", MLFLOW_PRODUCTION_ALIAS,
+                    MLFLOW_REGISTERED_MODEL_NAME, version)
+    return model_info
+
+
+def log_clustering_run(
+    mlflow,
+    X_final: pd.DataFrame,
+    df_clustered: pd.DataFrame,
+    kmeans: KMeans,
+    scaler: RobustScaler,
+    metrics: dict[str, float],
+    cluster_profiles: pd.DataFrame,
+    pca: PCA,
+    dataset_signature: dict,
+    risk_mapping: dict[int, str],
+    saved_artifacts: dict[str, Path],
+    plot_paths: list[Path],
+) -> str:
+    with mlflow.start_run(run_name=MLFLOW_RUN_NAME) as run:
+        mlflow.log_params({
+            "model_name": FINAL_MODEL_NAME,
+            "k": FINAL_K,
+            "n_init": FINAL_N_INIT,
+            "random_state": RANDOM_STATE,
+            "scaler_name": FINAL_SCALER_NAME,
+            "scaler_with_centering": scaler.with_centering,
+            "scaler_with_scaling": scaler.with_scaling,
+            "scaler_quantile_range": str(scaler.quantile_range),
+            "n_features": len(FINAL_FEATURES),
+            "features": ",".join(FINAL_FEATURES),
+            "pca_n_components": pca.n_components,
+            "registered_model_name": MLFLOW_REGISTERED_MODEL_NAME,
+        })
+        for feature, center, scale in zip(FINAL_FEATURES, scaler.center_, scaler.scale_):
+            mlflow.log_param(f"scaler_center_{feature}", float(center))
+            mlflow.log_param(f"scaler_scale_{feature}", float(scale))
+        for feature, threshold in RISK_THRESHOLDS.items():
+            mlflow.log_param(f"risk_threshold_{feature}", threshold)
+
+        mlflow.log_metrics(metrics)
+        for cluster_id, row in cluster_profiles.iterrows():
+            mlflow.log_metric(f"cluster_{cluster_id}_count", float(row["count"]))
+            mlflow.log_metric(f"cluster_{cluster_id}_pct", float(row["percentage"]))
+            mlflow.log_metric(f"cluster_{cluster_id}_glucose_mean", float(row["Glucose"]))
+            mlflow.log_metric(f"cluster_{cluster_id}_bmi_mean", float(row["BMI"]))
+            mlflow.log_metric(f"cluster_{cluster_id}_dpf_mean",
+                              float(row["DiabetesPedigreeFunction"]))
+        mlflow.log_metric("pca_total_explained_variance",
+                          float(pca.explained_variance_ratio_.sum()))
+
+        mlflow.set_tags({
+            "step": "clustering",
+            "dataset_content_sha256": dataset_signature["content_sha256"],
+            "dataset_schema_sha256": dataset_signature["schema_sha256"],
+            "dataset_n_rows": str(dataset_signature["n_rows"]),
+            "cluster_mapping": json.dumps(
+                {str(k): v for k, v in risk_mapping.items()}, ensure_ascii=False),
+        })
+
+        mlflow.log_dict({"features": FINAL_FEATURES}, "traceability/features.json")
+        mlflow.log_dict(get_library_versions(), "traceability/library_versions.json")
+        mlflow.log_dict(dataset_signature, "traceability/dataset_signature.json")
+
+        for name in ("Scaler", "K-Means", "PCA"):
+            mlflow.log_artifact(str(saved_artifacts[name]), artifact_path="models")
+        mlflow.log_artifact(str(saved_artifacts["Configuration"]), artifact_path="config")
+        for name in ("Cluster profiles", "Risk profile", "PCA variance"):
+            mlflow.log_artifact(str(saved_artifacts[name]), artifact_path="reports")
+        mlflow.log_artifact(str(saved_artifacts["Dataset"]), artifact_path="data")
+        for plot in plot_paths:
+            mlflow.log_artifact(str(plot), artifact_path="plots")
+
+        model_info = log_pyfunc_model(mlflow, X_final, df_clustered, saved_artifacts)
+        mlflow.set_tag("model_uri", model_info.model_uri)
+
+        run_id = run.info.run_id
+        logger.info("Run MLflow terminé : %s", run_id)
+        return run_id
+
+
+def clustering_pipeline(
+    use_mlflow: bool = True,
+    tracking_uri: str | None = None,
+) -> tuple[pd.DataFrame, dict]:
+
+    df_clean, df_transformed = load_data()
+    validate_data(df_clean, df_transformed)
+
+    dataset_signature = compute_dataset_signature(df_transformed)
+
+    X_final = build_clustering_matrix(df_transformed)
+    scaler, X_final_scaled = fit_scaler(X_final)
+
+    kmeans, raw_labels = train_kmeans(X_final_scaled)
+
+    final_labels, label_mapping = relabel_by_glucose(raw_labels, df_clean)
+    df_clustered = add_cluster_column(df_clean, final_labels)
+    metrics = compute_clustering_metrics(X_final_scaled, final_labels, kmeans)
+
+    cluster_profiles = compute_cluster_profiles(df_clustered)
+    risk_profile = compute_risk_profile(cluster_profiles)
+    high_risk_cluster = identify_high_risk_cluster(risk_profile)
+    df_clustered, risk_mapping = add_risk_category(df_clustered, high_risk_cluster)
+
+    pca, X_pca = fit_pca(X_final_scaled)
+    pca_variance_pct = compute_pca_variance(pca)
+    centroids_pca = pca.transform(kmeans.cluster_centers_)
+    order = [old for old, _ in sorted(label_mapping.items(), key=lambda kv: kv[1])]
+    plot_paths = [
+        plot_pca_clusters(X_pca, final_labels, centroids_pca[order], pca_variance_pct),
+        plot_cluster_sizes(df_clustered),
+    ]
+
+    config = build_clustering_config(
+        df_clustered, scaler, kmeans, pca, risk_mapping,
+        label_mapping, metrics, dataset_signature,
+    )
+    saved_artifacts = save_artifacts(
+        df_clustered, scaler, kmeans, pca, config,
+        cluster_profiles, risk_profile, pca_variance_pct,
+    )
+
+    verify_saved_artifacts(X_final, X_final_scaled, raw_labels, X_pca, df_clustered)
+
+    run_id = None
+    if use_mlflow:
+        mlflow_module = setup_mlflow(tracking_uri)
+        run_id = log_clustering_run(
+            mlflow_module, X_final, df_clustered, kmeans, scaler, metrics,
+            cluster_profiles, pca, dataset_signature, risk_mapping,
+            saved_artifacts, plot_paths,
+        )
+
+    logger.info("Tous les artefacts ont été sauvegardés :")
+    for name, path in saved_artifacts.items():
+        logger.info("  %-18s : %s", name, path)
+
+    summary = {"run_id": run_id, "metrics": metrics, "artifacts": saved_artifacts}
+    return df_clustered, summary
+
+
+if __name__ == "__main__":
+    clustered, summary = clustering_pipeline()
+    print(f"\nDataset clusterisé : {clustered.shape}")
+    print(clustered["risk_category"].value_counts())
+    if summary["run_id"]:
+        print(f"MLflow run_id : {summary['run_id']}")
