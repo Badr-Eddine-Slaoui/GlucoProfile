@@ -213,3 +213,75 @@ def run_cross_validation(
     return cv_metrics
 
 
+def evaluate_pipeline(
+    pipeline: Pipeline,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+) -> tuple[dict[str, float], np.ndarray, np.ndarray, np.ndarray]:
+    y_pred = pipeline.predict(X_test)
+    y_proba = pipeline.predict_proba(X_test)[:, 1]
+    cm = confusion_matrix(y_test, y_pred, labels=CLASS_LABELS)
+    tn, fp, fn, tp = cm.ravel()
+    metrics = {
+        "accuracy": float(accuracy_score(y_test, y_pred)),
+        "precision": float(precision_score(y_test, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_test, y_pred, zero_division=0)),
+        "f1": float(f1_score(y_test, y_pred, zero_division=0)),
+        "roc_auc": float(roc_auc_score(y_test, y_proba)),
+        "tn": float(tn),
+        "fp": float(fp),
+        "fn": float(fn),
+        "tp": float(tp),
+    }
+    logger.info(
+        "Test : accuracy=%.4f | precision=%.4f | recall=%.4f | f1=%.4f | roc_auc=%.4f",
+        metrics["accuracy"], metrics["precision"], metrics["recall"],
+        metrics["f1"], metrics["roc_auc"],
+    )
+    report = classification_report(
+        y_test, y_pred,
+        labels=CLASS_LABELS,
+        target_names=CLASS_NAMES,
+        digits=4,
+        zero_division=0,
+    )
+    logger.info("Classification report :\n%s", report)
+    return metrics, cm, y_pred, y_proba
+
+
+def build_predictions_report(
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    y_pred: np.ndarray,
+    y_proba: np.ndarray,
+    risk_mapping: dict[int, str],
+) -> pd.DataFrame:
+    report = X_test.copy()
+    report["true_cluster"] = y_test.to_numpy()
+    report["predicted_cluster"] = y_pred
+    report["true_risk_category"] = report["true_cluster"].map(risk_mapping)
+    report["predicted_risk_category"] = report["predicted_cluster"].map(risk_mapping)
+    report["prob_cluster_1"] = y_proba
+    report["confidence"] = np.maximum(y_proba, 1 - y_proba)
+    report["correct"] = report["true_cluster"] == report["predicted_cluster"]
+    return report
+
+
+def compute_coefficients(pipeline: Pipeline, X_train: pd.DataFrame) -> pd.DataFrame:
+    classifier = pipeline.named_steps["classifier"]
+    coefficients = classifier.coef_[0]
+    train_std = X_train[FEATURES].std(ddof=0).to_numpy()
+    table = pd.DataFrame({
+        "feature": FEATURES,
+        "coefficient": coefficients,
+        "train_std": train_std,
+        "standardized_coefficient": coefficients * train_std,
+        "odds_ratio_per_unit": np.exp(coefficients),
+    })
+    table["abs_standardized_coefficient"] = table["standardized_coefficient"].abs()
+    table["direction"] = np.where(table["coefficient"] > 0, "Vers Cluster 1", "Vers Cluster 0")
+    table = table.sort_values("abs_standardized_coefficient", ascending=False).reset_index(drop=True)
+    table.insert(0, "rank", np.arange(1, len(table) + 1))
+    return table
+
+
