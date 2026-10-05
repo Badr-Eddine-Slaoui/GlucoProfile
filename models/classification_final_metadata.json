@@ -1,0 +1,87 @@
+{
+  "model": {
+    "name": "LogisticRegression",
+    "scaler": "NoScaling",
+    "sampler": "None",
+    "hyperparameters": {
+      "C": 10.0,
+      "max_iter": 5000,
+      "penalty": "l2",
+      "solver": "lbfgs",
+      "random_state": 42
+    }
+  },
+  "features": [
+    "Pregnancies",
+    "Glucose",
+    "BloodPressure",
+    "SkinThickness",
+    "Insulin",
+    "BMI",
+    "DiabetesPedigreeFunction",
+    "Age"
+  ],
+  "target": "Cluster",
+  "classes": [
+    0,
+    1
+  ],
+  "cluster_mapping": {
+    "0": "Risque Faible",
+    "1": "Risque Élevé"
+  },
+  "split": {
+    "test_size": 0.2,
+    "random_state": 42,
+    "n_train": 614,
+    "n_test": 154
+  },
+  "test_metrics": {
+    "accuracy": 0.987012987012987,
+    "precision": 0.9746835443037974,
+    "recall": 1.0,
+    "f1": 0.9871794871794872,
+    "roc_auc": 0.9983133749367515,
+    "tn": 75.0,
+    "fp": 2.0,
+    "fn": 0.0,
+    "tp": 77.0
+  },
+  "cv_metrics": {
+    "cv_accuracy_mean": 0.9885779021724644,
+    "cv_accuracy_std": 0.009809590654819579,
+    "cv_precision_mean": 0.9872983870967742,
+    "cv_precision_std": 0.015559501114173167,
+    "cv_recall_mean": 0.990269698572184,
+    "cv_recall_std": 0.012930072373950078,
+    "cv_f1_mean": 0.9886686595203187,
+    "cv_f1_std": 0.009732268042189933
+  },
+  "dataset_signature": {
+    "n_rows": 768,
+    "n_columns": 9,
+    "columns": [
+      "Pregnancies",
+      "Glucose",
+      "BloodPressure",
+      "SkinThickness",
+      "Insulin",
+      "BMI",
+      "DiabetesPedigreeFunction",
+      "Age",
+      "Cluster"
+    ],
+    "content_sha256": "f6e0382c25b2e72e8a829c4a584991dd303d49b7d0fac07c00df61a72cc808d8",
+    "schema_sha256": "a25735554629e8243f16b6d9cf8baa7742b96f7e086f0cb0d7b6c830e4aee3d7"
+  },
+  "library_versions": {
+    "python": "3.13.14",
+    "numpy": "2.2.6",
+    "pandas": "2.2.3",
+    "scikit-learn": "1.6.1",
+    "scipy": "1.15.2",
+    "joblib": "1.4.2",
+    "matplotlib": "3.10.0",
+    "mlflow": "not-installed"
+  }
+}

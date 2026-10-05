@@ -307,3 +307,117 @@ def plot_confusion_matrix(
     return path
 
 
+def get_library_versions(libraries: list[str] = LIBRARIES_TO_LOG) -> dict[str, str]:
+    versions = {"python": platform.python_version()}
+    for lib in libraries:
+        try:
+            versions[lib] = metadata.version(lib)
+        except metadata.PackageNotFoundError:
+            versions[lib] = "not-installed"
+    return versions
+
+
+def build_metadata(
+    pipeline: Pipeline,
+    metrics: dict[str, float],
+    cv_metrics: dict[str, float],
+    risk_mapping: dict[int, str],
+    dataset_signature: dict,
+    n_train: int,
+    n_test: int,
+) -> dict:
+    classifier = pipeline.named_steps["classifier"]
+    return {
+        "model": {
+            "name": FINAL_MODEL_NAME,
+            "scaler": FINAL_SCALER_NAME,
+            "sampler": FINAL_SAMPLER_NAME,
+            "hyperparameters": {
+                "C": float(classifier.C),
+                "max_iter": int(classifier.max_iter),
+                "penalty": str(classifier.penalty),
+                "solver": str(classifier.solver),
+                "random_state": int(RANDOM_STATE),
+            },
+        },
+        "features": FEATURES,
+        "target": TARGET,
+        "classes": CLASS_LABELS,
+        "cluster_mapping": {str(k): v for k, v in risk_mapping.items()},
+        "split": {
+            "test_size": TEST_SIZE,
+            "random_state": RANDOM_STATE,
+            "n_train": int(n_train),
+            "n_test": int(n_test),
+        },
+        "test_metrics": metrics,
+        "cv_metrics": cv_metrics,
+        "dataset_signature": dataset_signature,
+        "library_versions": get_library_versions(),
+    }
+
+
+def save_dataframe(df: pd.DataFrame, path: Path, index: bool = False) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=index)
+    return path
+
+
+def save_artifacts(
+    pipeline: Pipeline,
+    config: dict,
+    metrics: dict[str, float],
+    cv_metrics: dict[str, float],
+    coefficients: pd.DataFrame,
+    predictions: pd.DataFrame,
+) -> dict[str, Path]:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    joblib.dump(pipeline, FINAL_PIPELINE_PATH)
+
+    with FINAL_METADATA_PATH.open("w", encoding="utf-8") as file:
+        json.dump(config, file, indent=2, ensure_ascii=False)
+
+    metrics_table = pd.DataFrame(
+        {"metric": list({**metrics, **cv_metrics}.keys()),
+         "value": list({**metrics, **cv_metrics}.values())}
+    )
+    save_dataframe(metrics_table, FINAL_METRICS_REPORT_PATH)
+    save_dataframe(coefficients, FINAL_COEFFICIENTS_REPORT_PATH)
+    save_dataframe(predictions, FINAL_PREDICTIONS_REPORT_PATH, index=True)
+
+    saved = {
+        "Pipeline": FINAL_PIPELINE_PATH,
+        "Metadata": FINAL_METADATA_PATH,
+        "Metrics": FINAL_METRICS_REPORT_PATH,
+        "Coefficients": FINAL_COEFFICIENTS_REPORT_PATH,
+        "Predictions": FINAL_PREDICTIONS_REPORT_PATH,
+    }
+    for name, path in saved.items():
+        assert path.exists(), f"Artefact manquant : {name} ({path})"
+    return saved
+
+
+def verify_saved_pipeline(X_test: pd.DataFrame, y_pred: np.ndarray, y_proba: np.ndarray) -> None:
+    loaded = joblib.load(FINAL_PIPELINE_PATH)
+    assert np.array_equal(loaded.predict(X_test), y_pred)
+    assert np.allclose(loaded.predict_proba(X_test)[:, 1], y_proba)
+    logger.info("Vérification par rechargement réussie")
+
+
+def is_model_valid_for_production(metrics: dict[str, float]) -> bool:
+    valid = (
+        metrics["f1"] >= MIN_F1_FOR_PRODUCTION
+        and metrics["recall"] >= MIN_RECALL_FOR_PRODUCTION
+    )
+    logger.info(
+        "Validation production : f1=%.4f (min %.2f) | recall=%.4f (min %.2f) -> %s",
+        metrics["f1"], MIN_F1_FOR_PRODUCTION,
+        metrics["recall"], MIN_RECALL_FOR_PRODUCTION,
+        "OK" if valid else "REFUSÉ",
+    )
+    return valid
+
+
