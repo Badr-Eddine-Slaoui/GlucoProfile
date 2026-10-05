@@ -92,6 +92,26 @@ LIBRARIES_TO_LOG = [
 ]
 
 
+class ClassificationModel(mlflow.pyfunc.PythonModel):
+    def load_context(self, context):
+        self.pipeline = joblib.load(context.artifacts["pipeline"])
+        with open(context.artifacts["metadata"], encoding="utf-8") as file:
+            config = json.load(file)
+        self.features = config["features"]
+        self.risk_map = {int(k): v for k, v in config["cluster_mapping"].items()}
+
+    def predict(self, context, model_input, params=None):
+        X = model_input[self.features].astype("float64")
+        clusters = np.asarray(self.pipeline.predict(X)).astype("int64")
+        proba = self.pipeline.predict_proba(X)[:, 1]
+        return pd.DataFrame({
+            "Cluster": clusters,
+            "risk_category": [self.risk_map[int(c)] for c in clusters],
+            "prob_cluster_1": proba.astype("float64"),
+            "confidence": np.maximum(proba, 1 - proba).astype("float64"),
+        })
+
+
 def load_data(path: Path = CLUSTERED_DATA_PATH) -> pd.DataFrame:
     if not Path(path).exists():
         raise FileNotFoundError(f"Fichier introuvable : {path}")
@@ -419,5 +439,145 @@ def is_model_valid_for_production(metrics: dict[str, float]) -> bool:
         "OK" if valid else "REFUSÉ",
     )
     return valid
+
+
+def setup_mlflow(
+    tracking_uri: str | None = None,
+    experiment_name: str = MLFLOW_EXPERIMENT_NAME,
+):
+    uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI", DEFAULT_MLFLOW_URI)
+    mlflow.set_tracking_uri(uri)
+    mlflow.set_experiment(experiment_name)
+    logger.info("MLflow : uri=%s, experiment=%s", uri, experiment_name)
+    return mlflow
+
+
+def log_pyfunc_model(
+    mlflow,
+    pipeline: Pipeline,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_pred: np.ndarray,
+    y_proba: np.ndarray,
+    risk_mapping: dict[int, str],
+    saved_artifacts: dict[str, Path],
+):
+    input_example = X_train.head(5).astype("float64")
+    example_clusters = np.asarray(pipeline.predict(input_example)).astype("int64")
+    example_proba = pipeline.predict_proba(input_example)[:, 1].astype("float64")
+    output_example = pd.DataFrame({
+        "Cluster": example_clusters,
+        "risk_category": [risk_mapping[int(c)] for c in example_clusters],
+        "prob_cluster_1": example_proba,
+        "confidence": np.maximum(example_proba, 1 - example_proba).astype("float64"),
+    })
+    signature = infer_signature(input_example, output_example)
+
+    model_info = mlflow.pyfunc.log_model(
+        artifact_path=MLFLOW_MODEL_NAME,
+        python_model=ClassificationModel(),
+        artifacts={
+            "pipeline": str(saved_artifacts["Pipeline"]),
+            "metadata": str(saved_artifacts["Metadata"]),
+        },
+        signature=signature,
+        input_example=input_example,
+        pip_requirements=[
+            f"numpy=={metadata.version('numpy')}",
+            f"pandas=={metadata.version('pandas')}",
+            f"scikit-learn=={metadata.version('scikit-learn')}",
+            f"joblib=={metadata.version('joblib')}",
+        ],
+    )
+
+    loaded_model = mlflow.pyfunc.load_model(model_info.model_uri)
+    predictions = loaded_model.predict(X_test.astype("float64"))
+    assert np.array_equal(predictions["Cluster"].to_numpy(), np.asarray(y_pred))
+    assert np.allclose(predictions["prob_cluster_1"].to_numpy(), y_proba)
+    expected_risk = [risk_mapping[int(c)] for c in y_pred]
+    assert list(predictions["risk_category"]) == expected_risk
+    logger.info("Vérification du modèle MLflow rechargé réussie : %s", model_info.model_uri)
+    return model_info
+
+
+def log_classification_run(
+    mlflow,
+    pipeline: Pipeline,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_pred: np.ndarray,
+    y_proba: np.ndarray,
+    metrics: dict[str, float],
+    cv_metrics: dict[str, float],
+    risk_mapping: dict[int, str],
+    dataset_signature: dict,
+    saved_artifacts: dict[str, Path],
+    confusion_matrix_path: Path,
+    n_train: int,
+    n_test: int,
+) -> tuple[str, str]:
+    classifier = pipeline.named_steps["classifier"]
+
+    with mlflow.start_run(run_name=MLFLOW_RUN_NAME) as run:
+        mlflow.log_params({
+            "model_name": FINAL_MODEL_NAME,
+            "scaler_name": FINAL_SCALER_NAME,
+            "sampler_name": FINAL_SAMPLER_NAME,
+            "C": float(classifier.C),
+            "max_iter": int(classifier.max_iter),
+            "penalty": str(classifier.penalty),
+            "solver": str(classifier.solver),
+            "random_state": RANDOM_STATE,
+            "test_size": TEST_SIZE,
+            "cv_splits": CV_SPLITS,
+            "n_features": len(FEATURES),
+            "features": ",".join(FEATURES),
+            "n_train": n_train,
+            "n_test": n_test,
+            "registered_model_name": MLFLOW_REGISTERED_MODEL_NAME,
+        })
+
+        mlflow.log_metrics({
+            "accuracy": metrics["accuracy"],
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "f1_score": metrics["f1"],
+            "roc_auc": metrics["roc_auc"],
+            "tn": metrics["tn"],
+            "fp": metrics["fp"],
+            "fn": metrics["fn"],
+            "tp": metrics["tp"],
+        })
+        mlflow.log_metrics(cv_metrics)
+
+        mlflow.set_tags({
+            "step": "classification",
+            "target": TARGET,
+            "dataset_content_sha256": dataset_signature["content_sha256"],
+            "dataset_schema_sha256": dataset_signature["schema_sha256"],
+            "dataset_n_rows": str(dataset_signature["n_rows"]),
+            "cluster_mapping": json.dumps(
+                {str(k): v for k, v in risk_mapping.items()}, ensure_ascii=False),
+        })
+
+        mlflow.log_dict({"features": FEATURES}, "traceability/features.json")
+        mlflow.log_dict(get_library_versions(), "traceability/library_versions.json")
+        mlflow.log_dict(dataset_signature, "traceability/dataset_signature.json")
+
+        mlflow.log_artifact(str(confusion_matrix_path), artifact_path="plots")
+        mlflow.log_artifact(str(saved_artifacts["Pipeline"]), artifact_path="pipeline")
+        mlflow.log_artifact(str(saved_artifacts["Metadata"]), artifact_path="config")
+        for name in ("Metrics", "Coefficients", "Predictions"):
+            mlflow.log_artifact(str(saved_artifacts[name]), artifact_path="reports")
+
+        model_info = log_pyfunc_model(
+            mlflow, pipeline, X_train, X_test, y_pred, y_proba,
+            risk_mapping, saved_artifacts,
+        )
+        mlflow.set_tag("model_uri", model_info.model_uri)
+
+        run_id = run.info.run_id
+        logger.info("Run MLflow terminé : %s", run_id)
+        return run_id, model_info.model_uri
 
 
