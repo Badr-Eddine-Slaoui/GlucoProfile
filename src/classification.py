@@ -285,3 +285,25 @@ def compute_coefficients(pipeline: Pipeline, X_train: pd.DataFrame) -> pd.DataFr
     return table
 
 
+def plot_confusion_matrix(
+    y_true: pd.Series,
+    y_pred: np.ndarray,
+    path: Path = CONFUSION_MATRIX_PLOT_PATH,
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ConfusionMatrixDisplay.from_predictions(
+        y_true, y_pred,
+        labels=CLASS_LABELS,
+        display_labels=CLASS_NAMES,
+        cmap="Blues",
+        ax=ax,
+        colorbar=False,
+    )
+    ax.set_title("Matrice de confusion — modèle final")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
