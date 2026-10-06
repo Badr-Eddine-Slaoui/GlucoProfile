@@ -581,3 +581,110 @@ def log_classification_run(
         return run_id, model_info.model_uri
 
 
+def register_and_promote_model(
+    mlflow,
+    model_uri: str,
+    run_id: str,
+    metrics: dict[str, float],
+    promote: bool = True,
+) -> dict:
+    client = mlflow.MlflowClient()
+    model_version = mlflow.register_model(
+        model_uri=model_uri,
+        name=MLFLOW_REGISTERED_MODEL_NAME,
+    )
+    version = str(model_version.version)
+    logger.info("Modèle enregistré : %s v%s", MLFLOW_REGISTERED_MODEL_NAME, version)
+
+    client.set_model_version_tag(MLFLOW_REGISTERED_MODEL_NAME, version, "run_id", run_id)
+    client.set_model_version_tag(MLFLOW_REGISTERED_MODEL_NAME, version, "f1_score",
+                                f"{metrics['f1']:.4f}")
+    client.set_model_version_tag(MLFLOW_REGISTERED_MODEL_NAME, version, "recall",
+                                f"{metrics['recall']:.4f}")
+
+    promoted = False
+    if promote and is_model_valid_for_production(metrics):
+        try:
+            client.set_registered_model_alias(
+                MLFLOW_REGISTERED_MODEL_NAME, MLFLOW_PRODUCTION_ALIAS, version)
+            promoted = True
+            logger.info("Alias '%s' -> version %s", MLFLOW_PRODUCTION_ALIAS, version)
+        except Exception as error:
+            logger.warning("Alias impossible : %s", error)
+    elif promote:
+        logger.warning("Version %s non promue : seuils de validation non atteints", version)
+
+    return {"name": MLFLOW_REGISTERED_MODEL_NAME, "version": version, "promoted": promoted}
+
+
+def classification_pipeline(
+    use_mlflow: bool = True,
+    tracking_uri: str | None = None,
+    register_model: bool = True,
+    promote_to_production: bool = True,
+) -> tuple[Pipeline, dict]:
+    df = load_data()
+    validate_data(df)
+
+    dataset_signature = compute_dataset_signature(df[FEATURES + [TARGET]])
+    risk_mapping = build_risk_mapping(df)
+
+    X, y = build_xy(df)
+    X_train, X_test, y_train, y_test = split_data(X, y)
+
+    pipeline = build_final_pipeline()
+    cv_metrics = run_cross_validation(pipeline, X_train, y_train)
+
+    pipeline = train_pipeline(pipeline, X_train, y_train)
+
+    metrics, cm, y_pred, y_proba = evaluate_pipeline(pipeline, X_test, y_test)
+    predictions = build_predictions_report(X_test, y_test, y_pred, y_proba, risk_mapping)
+    coefficients = compute_coefficients(pipeline, X_train)
+    confusion_matrix_path = plot_confusion_matrix(y_test, y_pred)
+
+    config = build_metadata(
+        pipeline, metrics, cv_metrics, risk_mapping,
+        dataset_signature, len(X_train), len(X_test),
+    )
+    saved_artifacts = save_artifacts(
+        pipeline, config, metrics, cv_metrics, coefficients, predictions,
+    )
+    verify_saved_pipeline(X_test, y_pred, y_proba)
+
+    run_id = None
+    registry_info = None
+    if use_mlflow:
+        mlflow_module = setup_mlflow(tracking_uri)
+        run_id, model_uri = log_classification_run(
+            mlflow_module, pipeline, X_train, X_test, y_pred, y_proba,
+            metrics, cv_metrics, risk_mapping, dataset_signature,
+            saved_artifacts, confusion_matrix_path, len(X_train), len(X_test),
+        )
+        if register_model:
+            registry_info = register_and_promote_model(
+                mlflow_module, model_uri, run_id, metrics, promote=promote_to_production,
+            )
+
+    logger.info("Tous les artefacts ont été sauvegardés :")
+    for name, path in saved_artifacts.items():
+        logger.info("  %-14s : %s", name, path)
+
+    summary = {
+        "run_id": run_id,
+        "metrics": metrics,
+        "cv_metrics": cv_metrics,
+        "registry": registry_info,
+        "artifacts": saved_artifacts,
+    }
+    return pipeline, summary
+
+
+if __name__ == "__main__":
+    final_pipeline, summary = classification_pipeline()
+    print(f"\nModèle final : {FINAL_MODEL_NAME} (C={FINAL_C})")
+    for name in ("accuracy", "precision", "recall", "f1", "roc_auc"):
+        print(f"{name:<10}: {summary['metrics'][name]:.4f}")
+    if summary["run_id"]:
+        print(f"MLflow run_id : {summary['run_id']}")
+    if summary["registry"]:
+        print(f"Registry      : {summary['registry']}")
